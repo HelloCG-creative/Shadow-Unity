@@ -155,8 +155,14 @@ using UnityEngine.Rendering;
                     
                     Vector3 lightDirWS = -light.transform.forward;
 
-                    // これが記事どおりの “Mshadow（WorldToShadowClip）”
-                    Matrix4x4 worldToShadowClip = CalcPSM_WorldToShadowClip_Article(camera, lightDirWS, shadowDistance, zNearMin: 0.1f);
+                    // WorldToShadowClip 行列を作る。モードで PSM / 普通のOrtho を切り替える。
+                    // どちらも同じ _LightVP / _LightShadow の仕組みで描く＆サンプルするので比較しやすい。
+                    Matrix4x4 worldToShadowClip;
+                    if (Asset.ShadowMode == MyRenderPipelineAsset.ShadowProjectionMode.PSM) {
+                        worldToShadowClip = CalcPSM_WorldToShadowClip_Article(camera, lightDirWS, shadowDistance, zNearMin: 0.1f);
+                    } else {
+                        worldToShadowClip = CalcUniformShadow(cullingResults, lightIndex, shadowResolution);
+                    }
 
                     // グローバル送信（メインパスの影計算でも同じ行列を使う）
                     SetupLightProperties(context, cmd, light, worldToShadowClip, shadowDistance);
@@ -164,7 +170,7 @@ using UnityEngine.Rendering;
                     // Shadow RT
                     SetupLightRT(context, cmd, shadowResolution);
 
-                    //      ShadowCaster を PSM 行列で描く
+                    // ShadowCaster を worldToShadowClip 行列で描く（PSM/Uniform共通）
                     DrawShadowPSM(context, cmd, cullingResults, worldToShadowClip);
                 }
                 
@@ -559,6 +565,23 @@ private static void GetNdcUnitCubeCorners(Vector3[] out8)
             }
 
             return lights;
+        }
+
+        /// <summary>
+        /// 普通の平行投影シャドウ用の WorldToShadowClip 行列（比較用）。
+        /// Unity 内製の ComputeDirectionalShadowMatricesAndCullingPrimitives で
+        /// 視錐台にフィットした view/proj を作り、GPU射影を合成して返す。
+        /// PSM と同じ _LightVP の枠組みに乗せるため、返り値は worldToShadowClip。
+        /// </summary>
+        private Matrix4x4 CalcUniformShadow(CullingResults cull, int lightIndex, int resolution) {
+            var light = cull.visibleLights[lightIndex].light;
+            cull.ComputeDirectionalShadowMatricesAndCullingPrimitives(
+                lightIndex,
+                0, 1, Vector3.zero,
+                resolution,
+                light.shadowNearPlane,
+                out var view, out var proj, out _);
+            return GL.GetGPUProjectionMatrix(proj, true) * view;
         }
 
         /// <summary>
