@@ -12,6 +12,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 55f7f2b78c19245189d82e9e08822240, type: 3}
   m_Name: ShadowRenderPipelineAsset
   m_EditorClassIdentifier: 
-  shadowMode: 0
+  shadowMode: 1
   shadowResolution: 4096
   shadowDistance: 50
