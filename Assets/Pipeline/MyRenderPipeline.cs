@@ -437,9 +437,8 @@ public class MyRenderPipeline : UnityEngine.Rendering.RenderPipeline
     {
         cmd.Clear();
         cmd.SetRenderTarget(LightShadowId);
-
-        // ★ PSMは view=Identity / proj=WorldToShadowClip
-        cmd.SetViewProjectionMatrices(Matrix4x4.identity, worldToShadowClip);
+        // ※ キャスターは TransformObjectToLightViewProjection で _LightVP を直接使うため、
+        //    UNITY_MATRIX_VP（SetViewProjectionMatrices）には依存しない。
         context.ExecuteCommandBuffer(cmd);
 
         var sorting = new SortingSettings() { criteria = SortingCriteria.None };
