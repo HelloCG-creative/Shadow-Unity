@@ -58,9 +58,6 @@ float CalcLightViewProjectionDepth(float4 positionLVP)
     #endif
 }
 
-float4x4 _A;
-float4x4 _B;
-
 /// <summary>
 /// シャドウによるライトの減衰度を取得する
 /// </summary>
@@ -70,17 +67,6 @@ float4 GetShadowAttenuation(float4 positionWS, float dotNL)
     float4 positionLVP = TransformWorldToLightViewProjection(positionWS);
     // LVP空間からシャドウマップのUV座標へと変換する
     float2 uv = positionLVP.xy / positionLVP.w * float2(0.5f, -0.5f) + 0.5f;
-    
-    float4 a = mul(_A, float4(positionWS.xyz,1));
-    float4 b = mul(_B, float4(positionWS.xyz,1));
-    //return float4(frac(a.w * 0.1), frac(b.w * 0.1), 0, 1);
-    
-    float2 uva = (a.xy / a.w) * 0.5 + 0.5;
-    float2 uvb = (b.xy / b.w) * 0.5 + 0.5;
-    float2 d = abs(uva - uvb) * 50; // 見えるように増幅
-    //return float4(d, 0, 1);
-    
-    //return float4(uv,0,1);
 
     // ワールド空間からカメラのビュー空間へと変換する
     float3 positionVS = mul(unity_MatrixV, positionWS);
