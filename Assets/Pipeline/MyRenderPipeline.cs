@@ -139,17 +139,21 @@ public class MyRenderPipeline : UnityEngine.Rendering.RenderPipeline
 
                 Vector3 lightDirWS = -light.transform.forward;
 
-                // WorldToShadowClip 行列を作る。モードで PSM / 普通のOrtho を切り替える。
-                // どちらも同じ _LightVP / _LightShadow の仕組みで描く＆サンプルするので比較しやすい。
+                // WorldToShadowClip 行列を作る。モードで PSM / Uniform / LiSPSM を切り替える。
+                // どれも同じ _LightVP / _LightShadow の仕組みで描く＆サンプルするので比較しやすい。
                 Matrix4x4 worldToShadowClip;
-                if (Asset.ShadowMode == MyRenderPipelineAsset.ShadowProjectionMode.PSM)
+                switch (Asset.ShadowMode)
                 {
-                    worldToShadowClip =
-                        CalcPSM_WorldToShadowClip_Article(camera, lightDirWS, shadowDistance, zNearMin: 0.1f);
-                }
-                else
-                {
-                    worldToShadowClip = CalcUniformShadow(cullingResults, lightIndex, shadowResolution);
+                    case MyRenderPipelineAsset.ShadowProjectionMode.PSM:
+                        worldToShadowClip =
+                            CalcPSM_WorldToShadowClip_Article(camera, lightDirWS, shadowDistance, zNearMin: 0.1f);
+                        break;
+                    case MyRenderPipelineAsset.ShadowProjectionMode.LiSPSM:
+                        worldToShadowClip = CalcLiSPSM(camera, lightDirWS, shadowDistance);
+                        break;
+                    default: // Uniform
+                        worldToShadowClip = CalcUniformShadow(cullingResults, lightIndex, shadowResolution);
+                        break;
                 }
 
                 // グローバル送信（メインパスの影計算でも同じ行列を使う）
@@ -587,6 +591,131 @@ public class MyRenderPipeline : UnityEngine.Rendering.RenderPipeline
             light.shadowNearPlane,
             out var view, out var proj, out _);
         return GL.GetGPUProjectionMatrix(proj, true) * view;
+    }
+
+    /// <summary>
+    /// カメラ視錐台の8頂点をワールド空間で求める（near4点 + far4点）。
+    /// far は shadowDistance で頭打ち。
+    /// </summary>
+    private static void GetFrustumCornersWorld(Camera cam, float shadowDistance, Vector3[] out8)
+    {
+        float near = cam.nearClipPlane;
+        float far  = Mathf.Min(cam.farClipPlane, shadowDistance);
+
+        var t = cam.transform;
+        float tanHalf = Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
+        float nearH = tanHalf * near, nearW = nearH * cam.aspect;
+        float farH  = tanHalf * far,  farW  = farH  * cam.aspect;
+
+        Vector3 cn = t.position + t.forward * near;
+        Vector3 cf = t.position + t.forward * far;
+        Vector3 up = t.up, right = t.right;
+
+        out8[0] = cn - right * nearW - up * nearH;
+        out8[1] = cn + right * nearW - up * nearH;
+        out8[2] = cn + right * nearW + up * nearH;
+        out8[3] = cn - right * nearW + up * nearH;
+        out8[4] = cf - right * farW  - up * farH;
+        out8[5] = cf + right * farW  - up * farH;
+        out8[6] = cf + right * farW  + up * farH;
+        out8[7] = cf - right * farW  + up * farH;
+    }
+
+    // AABB [pmin,pmax] を [-1,1]³ に写すアフィン行列（フィット用）
+    private static Matrix4x4 FitToUnitCube(Vector3 pmin, Vector3 pmax)
+    {
+        Vector3 s = new Vector3(2f / (pmax.x - pmin.x), 2f / (pmax.y - pmin.y), 2f / (pmax.z - pmin.z));
+        Vector3 o = new Vector3(-(pmax.x + pmin.x) / (pmax.x - pmin.x),
+                                -(pmax.y + pmin.y) / (pmax.y - pmin.y),
+                                -(pmax.z + pmin.z) / (pmax.z - pmin.z));
+        Matrix4x4 f = Matrix4x4.identity;
+        f.SetRow(0, new Vector4(s.x, 0, 0, o.x));
+        f.SetRow(1, new Vector4(0, s.y, 0, o.y));
+        // z（深度）は ortho版の向き（ライトに近い→-1）に合わせるため反転
+        f.SetRow(2, new Vector4(0, 0, -s.z, -o.z));
+        return f;
+    }
+
+    /// <summary>
+    /// LiSPSM（Light Space Perspective Shadow Map）の WorldToShadowClip 行列。
+    /// ライト空間で「カメラview方向(=y軸)だけを透視ワープ」する。
+    /// ワープの w は view軸のみに依存させるので、ライト方向の深度は歪まず影比較が正しく効く。
+    /// sinγ→0（ライト∥view）で n→∞ → ortho に退化（PSMのように破綻しない）。
+    /// </summary>
+    private Matrix4x4 CalcLiSPSM(Camera cam, Vector3 lightDirWS, float shadowDistance)
+    {
+        // 1) カメラ視錐台の8頂点(world) と 中心・外接半径
+        var corners = new Vector3[8];
+        GetFrustumCornersWorld(cam, shadowDistance, corners);
+
+        Vector3 center = Vector3.zero;
+        for (int i = 0; i < 8; i++) center += corners[i];
+        center /= 8f;
+        float radius = 0f;
+        for (int i = 0; i < 8; i++) radius = Mathf.Max(radius, (corners[i] - center).magnitude);
+
+        // 2) ライト空間の基底：up = カメラview方向をライトに垂直へ射影（=ワープ軸）
+        Vector3 L = lightDirWS.normalized;          // シーン→光源
+        Vector3 v = cam.transform.forward;          // カメラview方向
+        Vector3 up = v - Vector3.Dot(v, L) * L;     // v をライトに垂直へ
+        float dotLV = Vector3.Dot(L, v);
+        float sinGamma = Mathf.Sqrt(Mathf.Max(0f, 1f - dotLV * dotLV));
+
+        bool degenerate = up.sqrMagnitude < 1e-6f || sinGamma < 1e-3f;
+        if (degenerate) up = PickSafeUp(L);
+        else up.Normalize();
+
+        Vector3 eye = center + L * (radius + 1f);   // 全頂点が前方に来るよう後ろへ
+        Matrix4x4 Vl = MakeViewMatrix(eye, center, up);
+
+        // 3) ライト空間でAABB（y=ワープ軸(view), z=ライト深度）
+        Vector3 min = new Vector3(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
+        Vector3 max = new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity);
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 p = Vl.MultiplyPoint(corners[i]);
+            min = Vector3.Min(min, p);
+            max = Vector3.Max(max, p);
+        }
+
+        // 退化ケース（ライトがほぼ視線と平行）：ワープせず ortho
+        if (degenerate)
+        {
+            float nearO = Mathf.Max(0.01f, -max.z);
+            float farO = -min.z;
+            Matrix4x4 ortho = Matrix4x4.Ortho(min.x, max.x, min.y, max.y, nearO, farO);
+            return GL.GetGPUProjectionMatrix(ortho, true) * Vl;
+        }
+
+        // 4) n_opt（asura old formula）。apex を near端(min.y)の手前 n に置く
+        float d = max.y - min.y;
+        float factor = 1f / sinGamma;
+        float zN = factor * cam.nearClipPlane;
+        float zF = zN + d * sinGamma;
+        float n = (zN + Mathf.Sqrt(zF * zN)) * factor;
+        n *= Asset.LiSPSMWarpScale; // Inspectorでワープ強さを調整（小さいほど強ワープ=PSM寄り）
+
+        // 5) ワープ行列 M：w = y + (n - min.y)（view軸のみに依存）→ x,y を透視、z(深度)据え置き
+        Matrix4x4 M = Matrix4x4.identity;
+        M.SetRow(3, new Vector4(0f, 1f, 0f, n - min.y));
+
+        // 6) M適用後のAABBを求めて [-1,1]³ にフィット
+        Vector3 pmin = new Vector3(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
+        Vector3 pmax = new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity);
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 lp = Vl.MultiplyPoint(corners[i]);
+            Vector4 h = M * new Vector4(lp.x, lp.y, lp.z, 1f);
+            Vector3 pv = new Vector3(h.x, h.y, h.z) / h.w;
+            pmin = Vector3.Min(pmin, pv);
+            pmax = Vector3.Max(pmax, pv);
+        }
+        Matrix4x4 F = FitToUnitCube(pmin, pmax);
+
+        Debug.Log($"[LiSPSM] sinγ={sinGamma:F3} n={n:F2} d={d:F2}");
+
+        // 7) 合成： F × M × Vl（F×M が投影、Vl がビュー）
+        return GL.GetGPUProjectionMatrix(F * M, true) * Vl;
     }
 
     /// <summary>
